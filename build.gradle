@@ -1,0 +1,243 @@
+plugins {
+    id 'java'
+    id 'io.quarkus' version '1.3.0.Final'
+}
+
+repositories {
+     mavenLocal()
+     mavenCentral()
+}
+
+
+// add offline jacoco instrumentation using ant task.
+configurations {
+    jacocoAnt
+    jacocoAgent
+}
+
+
+//apply plugin: 'jacoco'
+apply plugin: 'io.quarkus'
+//apply plugin: 'org.owasp.dependencycheck'
+
+group = 'org.acme.tests-with-coverage-quickstart'
+project.version = 1.0
+
+sourceCompatibility = '1.11'
+targetCompatibility = '1.11'
+
+//sourceCompatibility = '1.8'
+//targetCompatibility = '1.8'
+
+
+dependencies {
+    implementation enforcedPlatform("${quarkusPlatformGroupId}:${quarkusPlatformArtifactId}:${quarkusPlatformVersion}")
+    implementation 'io.quarkus:quarkus-resteasy'
+    testImplementation "io.quarkus:quarkus-junit5"
+    testImplementation "io.rest-assured:rest-assured"
+    testImplementation 'io.quarkus:quarkus-resteasy'
+
+    jacocoAnt "org.jacoco:org.jacoco.ant:0.8.4:nodeps"
+    jacocoAgent "org.jacoco:org.jacoco.agent:0.8.4:runtime"
+
+//    testImplementation "org.jacoco:org.jacoco.agent:0.8.4:runtime"
+}
+
+
+test  {
+    useJUnitPlatform()
+}
+
+compileJava {
+    options.compilerArgs << '-parameters'
+}
+
+/*jacocoTestReport {
+    reports {
+        xml.enabled = true
+        csv.enabled = true
+        html.destination file("${buildDir}/jacocoHtml")
+    }
+}*/
+
+
+buildNative {
+    additionalBuildArgs = [
+            '-H:+ReportExceptionStackTraces',
+            '--enable-all-security-services',
+            '--allow-incomplete-classpath',
+            '-H:ReflectionConfigurationFiles='+project.projectDir.path+'/quarkus/reflect-config.json',
+            '-H:ResourceConfigurationFiles='+project.projectDir.path+'/quarkus/resource-config.json',
+            '-H:ProxyConfigurationFiles='+project.projectDir.path+'/quarkus/proxy-config.json']
+}
+
+
+// add jacoco offline instrumentation to get test code coverage for quarkus.
+
+ext {
+    //path for storage of original classes relative to classesDir
+    noninstrumentedPath='/../classes-non-instrumented'
+    //path for storage of instrumented classes relative to classesDir
+    instrumentedPath='/../classes-instrumented'
+    // file for storage of jacoco code coverage
+    jacocoCoveragePath="${buildDir}/jacoco/test.exec"
+    // path for jacoco html report
+    jacocoHtmlPath="${buildDir}/jacoco/reports/html"
+    // path for jacoco csv report
+    jacocoCsvFile="${buildDir}/jacoco/reports/jacoco.csv"
+    // path for jacoco xml report
+    jacocoXmlFile="${buildDir}/jacoco/reports/jacoco.xml"
+}
+
+tasks.compileTestJava.dependsOn('replaceClassesAfterInstrumenting')
+
+task copyClassesBeforeInstrumenting(dependsOn: ['classes'], type: Copy) {
+    group = 'Jacoco offline instrumentation'
+    description = 'copy original classes before instrumentation'
+
+    doFirst {
+        logger.lifecycle('copy classes before instrumentation')
+    }
+
+    sourceSets.main.output.classesDirs.each {
+            from(it) {
+                include "**/**"
+            }
+            into it.path + noninstrumentedPath
+        }
+}
+
+task deleteOriginalClasses(dependsOn:['instrument'], type: Delete) {
+    group = 'Jacoco offline instrumentation'
+    description = 'delete original classes before replacement of them by instrumented classes'
+
+    inputs.dir(fileTree(sourceSets.main.output.classesDirs.asPath))
+    outputs.upToDateWhen {
+        return true
+    }
+
+    doFirst {
+        logger.lifecycle('delete original classes before replacement of them by instrumented classes')
+    }
+
+    sourceSets.main.output.classesDirs.each {
+            delete fileTree(it).matching {
+                include "**/**"
+            }
+        }
+}
+
+task deleteInstrumentedClasses(dependsOn: ['test'], type: Delete) {
+    group = 'Jacoco offline instrumentation'
+    description = 'delete instrumented classes'
+
+    inputs.dir(fileTree(sourceSets.main.output.classesDirs.asPath))
+    outputs.upToDateWhen {
+        return true
+    }
+
+    doFirst {
+        logger.lifecycle('delete instrumented classes from classesDirs')
+    }
+
+    sourceSets.main.output.classesDirs.each {
+            delete fileTree(it).matching {
+                include "**/**"
+            }
+        }
+}
+
+
+task replaceClassesAfterInstrumenting(dependsOn: ['deleteOriginalClasses','instrument'], type: Copy) {
+    group = 'Jacoco offline instrumentation'
+    description = 'replace original classes with instrumented classes'
+
+    doFirst {
+        logger.lifecycle('replace original classes with instrumented ones')
+    }
+
+    sourceSets.main.output.classesDirs.each {
+            from(it.path + instrumentedPath) {
+                include "/**"
+            }
+            into it
+        }
+}
+
+task restoreNonInstrumentedClasses(dependsOn: ['deleteInstrumentedClasses'], type: Copy) {
+    group = 'Jacoco offline instrumentation'
+    description = 'restore original classes from non-instrumented classes'
+
+    doFirst {
+        logger.lifecycle('restore original classes from non-instrumented classes')
+    }
+
+    sourceSets.main.output.classesDirs.each {
+            from(it.path + noninstrumentedPath) {
+                include "/**"
+            }
+            into it
+        }
+}
+
+
+task instrument(dependsOn: ['copyClassesBeforeInstrumenting']) {
+    group = 'Jacoco offline instrumentation'
+    description = 'for each class in classesDirs provide its instrumented counterpart'
+
+    doLast {
+        logger.lifecycle('instrument classes by providing for each class its instrumented counterpart')
+        sourceSets.main.output.classesDirs.each {
+            ext.outputDir = it.path+instrumentedPath
+            ext.inputDir = it.path
+            logger.debug('instrument files from '+ it.path+instrumentedPath+' to '+ it.path)
+        ant.taskdef(name: 'instrument',
+                classname: 'org.jacoco.ant.InstrumentTask',
+                classpath: configurations.jacocoAnt.asPath)
+        ant.instrument(destdir: outputDir) {
+            fileset(dir: inputDir)
+         }
+        }
+    }
+}
+
+gradle.taskGraph.whenReady { graph ->
+    if (graph.hasTask(instrument)) {
+        tasks.withType(Test) {
+            doFirst {
+                systemProperty 'jacoco-agent.destfile', jacocoCoveragePath
+                classpath += configurations.jacocoAgent
+            }
+        }
+    }
+}
+
+task reportCoverage(dependsOn: ['test','restoreNonInstrumentedClasses']) {
+    group = 'Jacoco offline instrumentation'
+    description = 'provide jacoco coverage report from offline instrumented classes'
+    doLast {
+        logger.lifecycle('create jacoco report(s) from offline instrumented classes')
+        logger.debug('create jacoco report(s) from offline jacoco coverage report in %s', jacocoCoveragePath)
+        ant.taskdef(name: 'report',
+                classname: 'org.jacoco.ant.ReportTask',
+                classpath: configurations.jacocoAnt.asPath)
+        ant.report() {
+            executiondata {
+                ant.file(file: jacocoCoveragePath)
+            }
+            structure(name: 'Example') {
+                classfiles {
+                    sourceSets.main.output.classesDirs.each { fileset(dir: it) }
+                }
+                sourcefiles {
+                    fileset(dir: 'src/main/java')
+                    //uncomment this if you use groovy
+                    //fileset(dir: 'src/main/groovy')
+                }
+            }
+            if (jacocoHtmlPath) html(destdir: jacocoHtmlPath)
+            if (jacocoXmlFile)  xml(destfile: jacocoXmlFile)
+            if (jacocoCsvFile) csv(destfile: jacocoCsvFile)
+        }
+    }
+}
